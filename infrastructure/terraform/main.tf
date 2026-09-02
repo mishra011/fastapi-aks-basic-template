@@ -6,7 +6,7 @@ provider "azurerm" {
 }
 
 resource "azurerm_resource_group" "fastapi_rg" {
-  name     = "fastapi-resource-group"
+  name     = "fastapi-rg"
   location = "East US"
 }
 

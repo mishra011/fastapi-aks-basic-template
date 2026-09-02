@@ -2,8 +2,18 @@ venv/
 __pycache__/
 *.pyc
 .env
+.env.*
+!.env.example
 .terraform/
 *.tfstate
 *.tfstate.backup
 .venv
 venv
+
+# Local Kubernetes and Azure CLI artifacts
+kubeconfig
+*.kubeconfig
+
+# Local secret/config files
+secrets.env
+azure-credentials.json

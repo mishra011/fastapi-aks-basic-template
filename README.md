@@ -81,7 +81,7 @@ terraform apply -auto-approve
 ```
 
 This creates:
-- Azure Resource Group: `fastapi-resource-group`
+- Azure Resource Group: `fastapi-rg`
 - Azure Container Registry: `fastapiacrdm`
 - AKS Cluster: `fastapi-aks-cluster-dm`
 - AcrPull role assignment for AKS to access ACR
@@ -89,7 +89,7 @@ This creates:
 ## 3. Get Kubernetes Credentials
 
 ```bash
-az aks get-credentials --admin --name fastapi-aks-cluster-dm --resource-group fastapi-resource-group
+az aks get-credentials --admin --name fastapi-aks-cluster-dm --resource-group fastapi-rg
 ```
 
 Verify cluster connectivity:
@@ -257,7 +257,7 @@ cd ../..
 az acr login --name fastapiacrdm
 docker buildx build --platform linux/amd64 -t fastapiacrdm.azurecr.io/dmfastapi-app:latest --push .
 
-az aks get-credentials --admin --name fastapi-aks-cluster-dm --resource-group fastapi-resource-group
+az aks get-credentials --admin --name fastapi-aks-cluster-dm --resource-group fastapi-rg
 
 cd ./infrastructure/kubernetes
 kubectl apply -f deployment.yaml
