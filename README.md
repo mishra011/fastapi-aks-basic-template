@@ -5,6 +5,7 @@ This project deploys a simple FastAPI application to Azure Kubernetes Service (A
 - Azure Container Registry (ACR) for container images
 - Docker for containerizing the app
 - Kubernetes manifests for deployment and service exposure
+- Helm as an optional application deployment path for learning and comparison
 
 ## Project Structure
 
@@ -18,11 +19,17 @@ fastapi-devops-project/
 │   ├── kubernetes/
 │   │   ├── deployment.yaml
 │   │   └── service.yaml
+│   ├── helm/
+│   │   └── fastapi/
+│   │       ├── Chart.yaml
+│   │       ├── values.yaml
+│   │       └── templates/
 │   └── terraform/
 │       ├── main.tf
 │       └── terraform.tfstate
 ├── scripts/
-│   └── deploy.sh
+│   ├── deploy.sh
+│   └── deploy-helm.sh
 ├── docker-compose.yml
 └── README.md
 ```
@@ -133,7 +140,13 @@ Then push it to ACR:
 docker push fastapiacrdm.azurecr.io/dmfastapi-app:latest
 ```
 
-## 5. Deploy to Kubernetes
+## 5. Choose How to Deploy the App
+
+After Terraform creates the AKS cluster, you now have two app deployment options so you can learn both approaches side by side.
+
+### Option A: Raw Kubernetes manifests
+
+Go to the Kubernetes manifests folder:
 
 Go to the Kubernetes manifests folder:
 
@@ -159,6 +172,33 @@ Check the status:
 kubectl get pods
 kubectl get services
 ```
+
+This path keeps the current learning flow exactly as it is today.
+
+### Option B: Helm chart
+
+Go to the repository root and install or upgrade the Helm release:
+
+```bash
+helm upgrade --install fastapi-app ./infrastructure/helm/fastapi
+```
+
+You can also override values at deploy time:
+
+```bash
+helm upgrade --install fastapi-app ./infrastructure/helm/fastapi \
+  --set image.tag=latest \
+  --set replicaCount=2 \
+  --set service.type=LoadBalancer
+```
+
+Or use the helper script:
+
+```bash
+./scripts/deploy-helm.sh
+```
+
+Use this path when you want to practice Helm templating, release management, and value overrides.
 
 ## 6. Verify the Application
 
@@ -245,6 +285,11 @@ This usually means the image architecture does not match the AKS node architectu
 - The app listens on port `8000` inside the container.
 - The Kubernetes Service exposes it externally on port `80`.
 - The Terraform resource names match the Azure resources in this project and should be kept consistent with the AKS credentials command and the deployment image path.
+- The raw files in `infrastructure/kubernetes/` are intentionally kept for learning.
+- The Helm chart in `infrastructure/helm/fastapi/` is an additional deployment option, not a replacement.
+- Recommended learning split:
+  - Use Terraform + raw YAML when learning Kubernetes basics.
+  - Use Terraform + Helm when learning packaging, templating, and reusable app deployments.
 
 ## Final Deployment Summary
 
