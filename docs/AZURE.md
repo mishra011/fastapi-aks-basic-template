@@ -1,3 +1,5 @@
+> Legacy Azure reference. For the `aws` branch use [AWS deployment instructions](../README.md). These commands do not manage EKS.
+
 # Azure Portal guide for FastAPI, AKS, ACR, and GitHub Actions
 
 This is the portal companion to [HELM_INSTRUCTIONS.md](HELM_INSTRUCTIONS.md).

@@ -1,312 +1,143 @@
-# FastAPI DevOps Project With Azure Deployment Guide
+# FastAPI on AWS EKS
 
-This project deploys a simple FastAPI application to Azure Kubernetes Service (AKS) using:
-- Terraform for infrastructure provisioning
-- Azure Container Registry (ACR) for container images
-- Docker for containerizing the app
-- Kubernetes manifests for deployment and service exposure
-- Helm as an optional application deployment path for learning and comparison
+The `aws` branch deploys FastAPI to **Amazon EKS Auto Mode**, stores Docker images in **ECR**, and uses **Helm + GitHub Actions** for CI/CD. GitHub authenticates using OIDC; no AWS access keys are stored in GitHub.
 
-## Project Structure
+## Architecture
+
+Terraform creates a VPC across two availability zones, public subnets for the Network Load Balancer, private subnets for worker nodes, one NAT gateway, EKS Auto Mode, ECR, and IAM/OIDC access. Auto Mode manages compute, networking, storage, and load balancing. The service exposes HTTP port 80 and forwards to FastAPI port 8000; `/health` is used for readiness, liveness, and load balancer checks.
+
+The single NAT gateway is a development cost/availability tradeoff, not a highly available production design. EKS control plane, Auto Mode/EC2 nodes, NAT, public IPv4, NLB, data transfer, and ECR storage incur charges. The API endpoint is public with IAM authentication for GitHub-hosted runners; private access is also enabled. For production, use runners inside the VPC, restrict `public_access_cidrs`, and add HTTPS using ACM.
+
+## 1. Prerequisites
+
+Install AWS CLI v2, Terraform >=1.5, Docker with Buildx, kubectl matching the cluster minor version, Helm 4.2.4, and GitHub CLI. Sign in with your AWS administrative identity and GitHub account:
+
+```bash
+aws sso login --profile YOUR_PROFILE
+export AWS_PROFILE=YOUR_PROFILE
+aws sts get-caller-identity
+gh auth login
+```
+
+The AWS identity needs permission to provision VPC, EKS, ECR, IAM roles/policies/OIDC providers, and pass the EKS/node roles. `admin_principal_arn` must be the permanent IAM role/user ARN of the identity you will use for bootstrap and local deployment, not the `arn:aws:sts::...:assumed-role/...` session ARN shown by STS. For SSO, use the corresponding IAM role ARN including its path.
+
+## 2. Configure AWS Terraform
+
+**Use `infrastructure/terraform/aws` only.** The parent `infrastructure/terraform` contains the legacy Azure configuration and local Azure state. They remain separate so switching clouds cannot accidentally destroy Azure resources. AWS creation does not remove existing Azure resources or their charges.
+
+```bash
+cp infrastructure/terraform/aws/terraform.tfvars.example infrastructure/terraform/aws/terraform.tfvars
+```
+
+Edit `terraform.tfvars` with your AWS region, permanent admin ARN, and desired names. The example defaults to Mumbai (`ap-south-1`) and Kubernetes `1.35`; verify regional availability/quota before provisioning. Local tfvars and state are gitignored. Back up state securely; use an encrypted, versioned S3 backend with state locking before collaborating on infrastructure. CI validates Terraform only; it does not apply or destroy infrastructure or need access to its state.
+
+The example GitHub subject uses this repository's prefix returned by GitHub's OIDC API:
 
 ```text
-fastapi-devops-project/
-├── Dockerfile
-├── requirements.txt
-├── app/
-│   └── main.py
-├── infrastructure/
-│   ├── kubernetes/
-│   │   ├── deployment.yaml
-│   │   └── service.yaml
-│   ├── helm/
-│   │   └── fastapi/
-│   │       ├── Chart.yaml
-│   │       ├── values.yaml
-│   │       └── templates/
-│   └── terraform/
-│       ├── main.tf
-│       └── terraform.tfstate
-├── scripts/
-│   ├── deploy.sh
-│   └── deploy-helm.sh
-├── docker-compose.yml
-└── README.md
+repo:mishra011@11480002/fastapi-aks-basic-template@1353797397:ref:refs/heads/aws
 ```
 
-## 0. Clone the Repository
+For another repository, inspect its configuration:
 
 ```bash
-git clone https://github.com/mishra011/fastapi-aks.git
-cd fastapi-aks
+gh api repos/OWNER/REPO/actions/oidc/customization/sub
 ```
 
-## Prerequisites
+Use the exact `sub_claim_prefix` plus `:ref:refs/heads/aws` when using the default branch subject. For a custom claim template, use the actual token subject. Do not add a GitHub Environment without also updating the trust policy: environments change the subject. This Terraform configuration intentionally requires the `aws` branch subject.
 
-Make sure you have:
-- Azure CLI installed
-- Docker installed
-- kubectl installed
-- Terraform installed
-- An Azure subscription
+If your AWS account already has the GitHub OIDC provider, set `github_oidc_provider_arn` in tfvars to reuse it. Inspect existing providers with `aws iam list-open-id-connect-providers`.
 
-Verify tools:
+## 3. Create infrastructure and namespace
 
 ```bash
-az version
-terraform version
-docker --version
-kubectl version --client
+./setup_scripts/bootstrap_aws.sh
 ```
 
-## 1. Log in to Azure
+Review Terraform's plan and enter `yes` to provision. Bootstrap also creates the application namespace using your admin identity. The GitHub role has ECR push access for this repository, EKS DescribeCluster access, and EKS admin access limited to the app namespace. It cannot create namespaces or provision infrastructure.
+
+## 4. Link GitHub Actions
+
+Once bootstrap completes:
 
 ```bash
-az login
-az account show -o table
+./setup_scripts/configure_github_aws.sh
 ```
 
-If needed, set the subscription:
+This reads Terraform outputs and sets these values on the GitHub repository:
+
+| GitHub setting | Value |
+| --- | --- |
+| Secret `AWS_ROLE_ARN` | OIDC deployment role ARN |
+| Variable `AWS_REGION` | AWS region |
+| Variable `EKS_CLUSTER_NAME` | EKS cluster name |
+| Variable `ECR_REPOSITORY_URL` | Full ECR repository URL, without tag |
+| Variable `KUBE_NAMESPACE` | Application namespace (default `fastapi`) |
+| Variable `HELM_RELEASE` | Helm release (default `fastapi-app`) |
+
+Push the updated code to `aws`. `.github/workflows/deploy.yml` runs application tests, Helm lint/render, Terraform validation, shell syntax checks, and a container build. After validation passes on an `aws` push, it authenticates through AWS OIDC, builds/pushes a Linux AMD64 image, deploys Helm, waits for readiness and checks the public `/health` endpoint. Pull requests into `aws` run validation only. Manual dispatch is supported once GitHub exposes the workflow from the repository default branch; choose `aws` as the ref.
+
+Tags contain commit SHA, run ID, and attempt number so reruns work with immutable ECR tags. Keep old images needed for Helm rollbacks; prune older images deliberately as storage grows. `azure/setup-helm` only installs the Helm binary and requires no Azure account.
+
+## 5. Deploy locally
 
 ```bash
-az account set --subscription c9228dd2-1a35-4c93-a47c-60f9e28a7aec
+./scripts/deploy.sh
 ```
 
-## 2. Provision Azure Infrastructure with Terraform
-
-Go to the Terraform folder:
+This builds/pushes an AMD64 image (also from Apple Silicon), then deploys and health-checks it. To deploy an existing ECR tag:
 
 ```bash
-cd ./infrastructure/terraform
+IMAGE_TAG=YOUR_EXISTING_TAG ./scripts/deploy-helm.sh
 ```
 
-Initialize and apply Terraform:
+Scripts resolve configuration from AWS Terraform outputs unless environment variables override them. They use temporary kubeconfigs to avoid deploying to an unrelated current context.
+
+## 6. Inspect or roll back
 
 ```bash
-terraform init
-terraform apply -auto-approve
+aws eks update-kubeconfig --region ap-south-1 --name fastapi-eks
+kubectl get pods,svc -n fastapi
+kubectl get events -n fastapi --sort-by=.lastTimestamp
+helm history fastapi-app -n fastapi
+helm rollback fastapi-app PREVIOUS_REVISION -n fastapi --wait --timeout 15m
 ```
 
-This creates:
-- Azure Resource Group: `fastapi-rg`
-- Azure Container Registry: `fastapiacrdm`
-- AKS Cluster: `fastapi-aks-cluster-dm`
-- AcrPull role assignment for AKS to access ACR
+AWS returns a load balancer **hostname**, not a fixed external IP. Open `http://HOSTNAME/` or `/docs`. If health verification fails after Helm succeeds, inspect NLB targets and security groups; the script reports failure but does not automatically roll back. See [troubleshooting](docs/TROUBLESHOOTING.md).
 
-## 3. Get Kubernetes Credentials
+## 7. Optional raw Kubernetes manifests
+
+Helm is the CI/CD deployment path. For a separate learning deployment using an existing ECR image:
 
 ```bash
-az aks get-credentials --admin --name fastapi-aks-cluster-dm --resource-group fastapi-rg
+export IMAGE_URI=ACCOUNT.dkr.ecr.ap-south-1.amazonaws.com/fastapi-eks/fastapi:EXISTING_TAG
+kubectl set image --local -f infrastructure/kubernetes/deployment.yaml "fastapi=$IMAGE_URI" -o yaml | kubectl apply -n fastapi -f -
+kubectl apply -n fastapi -f infrastructure/kubernetes/service.yaml
+kubectl rollout status -n fastapi deployment/dmfastapi-app --timeout=15m
 ```
 
-Verify cluster connectivity:
+This creates a second deployment and NLB if Helm is already installed, with additional charges. Remove it with `kubectl delete -n fastapi -f infrastructure/kubernetes/` when done.
+
+## 8. Tear down AWS
+
+ECR defaults to protecting non-empty repositories. If you intend to delete all stored images, set `ecr_force_delete = true` in tfvars and apply that change first. Then:
 
 ```bash
-kubectl get nodes
-kubectl get pods
+./setup_scripts/destroy_infra.sh
 ```
 
-## 4. Build Docker Image
+The script asks for `DESTROY`, removes the Helm release and optional raw Service while EKS can still clean up NLBs, refuses to continue if other LoadBalancer Services remain, and asks for Terraform destroy approval. It checks that Terraform state is empty afterward. Check AWS for any manually created resources or persistent volumes before considering all charges stopped. Azure teardown must be performed separately with the original Azure configuration/state.
 
-From the app root:
+## Local application
 
 ```bash
-cd ..
-```
-
-If you are already in the repository root, you can skip this step.
-
-Login to ACR:
-
-```bash
-az acr login --name fastapiacrdm
-```
-
-Build the image:
-
-```bash
-docker build -t fastapiacrdm.azurecr.io/dmfastapi-app:latest .
-```
-
-If your machine is Apple Silicon and your AKS nodes are AMD64, build a multi-arch image:
-
-```bash
-docker buildx build --platform linux/amd64 -t fastapiacrdm.azurecr.io/dmfastapi-app:latest --push .
-```
-
-Then push it to ACR:
-
-```bash
-docker push fastapiacrdm.azurecr.io/dmfastapi-app:latest
-```
-
-## 5. Choose How to Deploy the App
-
-After Terraform creates the AKS cluster, you now have two app deployment options so you can learn both approaches side by side.
-
-### Option A: Raw Kubernetes manifests
-
-Go to the Kubernetes manifests folder:
-
-Go to the Kubernetes manifests folder:
-
-```bash
-cd ./infrastructure/kubernetes
-```
-
-Apply the deployment:
-
-```bash
-kubectl apply -f deployment.yaml
-```
-
-Apply the service:
-
-```bash
-kubectl apply -f service.yaml
-```
-
-Check the status:
-
-```bash
-kubectl get pods
-kubectl get services
-```
-
-This path keeps the current learning flow exactly as it is today.
-
-### Option B: Helm chart
-
-Go to the repository root and install or upgrade the Helm release:
-
-```bash
-helm upgrade --install fastapi-app ./infrastructure/helm/fastapi
-```
-
-You can also override values at deploy time:
-
-```bash
-helm upgrade --install fastapi-app ./infrastructure/helm/fastapi \
-  --set image.tag=latest \
-  --set replicaCount=2 \
-  --set service.type=LoadBalancer
-```
-
-Or use the helper script:
-
-```bash
-./scripts/deploy-helm.sh
-```
-
-Use this path when you want to practice Helm templating, release management, and value overrides.
-
-## 6. Verify the Application
-
-Wait for the external IP to be assigned:
-
-```bash
-kubectl get services
-```
-
-Once the external IP appears, open it in a browser:
-
-```text
-http://<external-ip>
-```
-
-Example:
-
-```text
-http://20.123.45.67/
-```
-
-## 7. View Logs
-
-Check pod logs:
-
-```bash
-kubectl get pods
-kubectl logs <pod-name>
-```
-
-Follow logs live:
-
-```bash
-kubectl logs -f <pod-name>
-```
-
-If deployment is stuck because the image is not pulling, inspect the pod:
-
-```bash
-kubectl describe pod <pod-name>
-```
-
-## 8. Restart Deployment
-
-```bash
-kubectl rollout restart deployment/dmfastapi-app
-kubectl rollout status deployment/dmfastapi-app
-```
-
-## 9. Local Docker Compose Option
-
-You can also run locally with Docker Compose:
-
-```bash
-cd .
 docker compose up --build
 ```
 
-Then visit:
+Open `http://localhost:8000`. The application code is cloud-independent.
 
-```text
-http://localhost:8000
-```
+## References
 
-## 10. Useful Troubleshooting Commands
-
-```bash
-kubectl get pods -o wide
-kubectl get svc
-kubectl describe pod <pod-name>
-kubectl logs <pod-name> --previous
-```
-
-If the image fails with an exec format error:
-
-```bash
-kubectl logs <pod-name>
-```
-
-This usually means the image architecture does not match the AKS node architecture. Rebuild using `docker buildx` for the correct platform.
-
-## Notes
-
-- The app listens on port `8000` inside the container.
-- The Kubernetes Service exposes it externally on port `80`.
-- The Terraform resource names match the Azure resources in this project and should be kept consistent with the AKS credentials command and the deployment image path.
-- The raw files in `infrastructure/kubernetes/` are intentionally kept for learning.
-- The Helm chart in `infrastructure/helm/fastapi/` is an additional deployment option, not a replacement.
-- Recommended learning split:
-  - Use Terraform + raw YAML when learning Kubernetes basics.
-  - Use Terraform + Helm when learning packaging, templating, and reusable app deployments.
-
-## Final Deployment Summary
-
-```bash
-cd ./infrastructure/terraform
-terraform init
-terraform apply -auto-approve
-
-cd ../..
-az acr login --name fastapiacrdm
-docker buildx build --platform linux/amd64 -t fastapiacrdm.azurecr.io/dmfastapi-app:latest --push .
-
-az aks get-credentials --admin --name fastapi-aks-cluster-dm --resource-group fastapi-rg
-
-cd ./infrastructure/kubernetes
-kubectl apply -f deployment.yaml
-kubectl apply -f service.yaml
-kubectl get pods
-kubectl get services
-```
+- [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html)
+- [Auto Mode NLB annotations](https://docs.aws.amazon.com/eks/latest/userguide/auto-configure-nlb.html)
+- [GitHub OIDC subject formats](https://docs.github.com/en/actions/reference/security/oidc)
+- [AWS credentials action](https://github.com/aws-actions/configure-aws-credentials)

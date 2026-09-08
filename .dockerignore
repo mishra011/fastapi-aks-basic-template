@@ -1,0 +1,16 @@
+.git
+.github
+.terraform
+**/.terraform
+**/*.tfstate*
+**/*.tfvars
+.env
+.env.*
+.venv
+venv
+__pycache__
+**/__pycache__
+*.kubeconfig
+kubeconfig
+secrets.env
+azure-credentials.json

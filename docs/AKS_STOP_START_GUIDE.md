@@ -1,3 +1,5 @@
+> Legacy Azure reference. For the `aws` branch use [AWS deployment instructions](../README.md). These commands do not manage EKS.
+
 # AKS Stop and Restart Guide
 
 This guide explains how to stop and restart the AKS cluster used by this project to help reduce Azure costs when the app is not needed.

@@ -4,7 +4,14 @@ metadata:
   name: {{ include "fastapi.fullname" . }}
   labels:
     {{- include "fastapi.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
+  {{- if and (eq .Values.service.type "LoadBalancer") .Values.service.loadBalancerClass }}
+  loadBalancerClass: {{ .Values.service.loadBalancerClass }}
+  {{- end }}
   type: {{ .Values.service.type }}
   selector:
     {{- include "fastapi.selectorLabels" . | nindent 4 }}

@@ -1,7 +1,11 @@
-docker build -t fastapiacrdm.azurecr.io/dmfastapi-app:latest .
-docker push fastapiacrdm.azurecr.io/dmfastapi-app:latest
-az aks get-credentials --admin --name fastapi-aks-cluster-dm --resource-group fastapi-rg
-kubectl get nodes
-cd infrastructure/kubernetes/
-kubectl apply -f deployment.yaml
-kubectl apply -f service.yaml
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/aws-common.sh"
+require_tools aws docker git
+load_config
+IMAGE_TAG="${IMAGE_TAG:-$(git -C "$REPO_ROOT" rev-parse HEAD)-local-$(date -u +%Y%m%d%H%M%S)}"
+export IMAGE_TAG
+registry="${ECR_REPOSITORY_URL%%/*}"
+aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$registry"
+docker buildx build --platform linux/amd64 --tag "$ECR_REPOSITORY_URL:$IMAGE_TAG" --push "$REPO_ROOT"
+exec "$REPO_ROOT/scripts/deploy-helm.sh"

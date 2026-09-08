@@ -1,95 +1,99 @@
-name: Deploy FastAPI to AKS
-
+name: Deploy FastAPI to AWS EKS
 on:
   push:
-    branches:
-      - dev
+    branches: [aws]
+  pull_request:
+    branches: [aws]
+  workflow_dispatch:
 
 permissions:
-  id-token: write
   contents: read
 
-env:
-  AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
-  AZURE_AKS_CLUSTER: ${{ vars.AZURE_AKS_CLUSTER }}
-  ACR_NAME: ${{ vars.ACR_NAME }}
-  IMAGE_NAME: ${{ vars.IMAGE_NAME }}
-  HELM_RELEASE: ${{ vars.HELM_RELEASE }}
-  KUBE_NAMESPACE: ${{ vars.KUBE_NAMESPACE }}
-  IMAGE_TAG: ${{ github.sha }}
-
 concurrency:
-  group: deploy-fastapi-dev
+  group: fastapi-aws-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  build-and-deploy:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-
+    timeout-minutes: 15
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Check deployment configuration
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt httpx
+      - name: Test application routes
+        run: python -m unittest discover -s tests -v
+      # This action only installs Helm; it does not authenticate to Azure.
+      - uses: azure/setup-helm@v5
+        with:
+          version: v4.2.4
+      - run: helm lint infrastructure/helm/fastapi
+      - run: helm template fastapi-app infrastructure/helm/fastapi --namespace fastapi > /tmp/fastapi.yaml
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.16.0'
+      - run: terraform -chdir=infrastructure/terraform/aws fmt -check
+      - run: terraform -chdir=infrastructure/terraform/aws init -backend=false -input=false -lockfile=readonly
+      - run: terraform -chdir=infrastructure/terraform/aws validate
+      - name: Validate shell scripts
         run: |
-          for name in AZURE_RESOURCE_GROUP AZURE_AKS_CLUSTER ACR_NAME IMAGE_NAME HELM_RELEASE KUBE_NAMESPACE; do
-            if [ -z "${!name}" ]; then
-              echo "::error::Missing repository variable: $name"
+          for script in scripts/*.sh setup_scripts/*.sh; do bash -n "$script"; done
+      - name: Build container
+        run: docker build --tag fastapi-validation .
+
+  deploy:
+    needs: validate
+    if: github.ref == 'refs/heads/aws' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+      ECR_REPOSITORY_URL: ${{ vars.ECR_REPOSITORY_URL }}
+      KUBE_NAMESPACE: ${{ vars.KUBE_NAMESPACE }}
+      HELM_RELEASE: ${{ vars.HELM_RELEASE }}
+      # Unique on reruns as ECR tags are immutable.
+      IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check configuration
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          for name in AWS_REGION EKS_CLUSTER_NAME ECR_REPOSITORY_URL KUBE_NAMESPACE HELM_RELEASE AWS_ROLE_ARN; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing GitHub configuration: $name. Run setup_scripts/configure_github_aws.sh."
               exit 1
             fi
           done
-
-      - name: Set up Helm
-        uses: azure/setup-helm@v5
+      - uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-${{ github.run_id }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: azure/setup-helm@v5
         with:
           version: v4.2.4
-
-      - name: Validate chart
-        run: helm lint ./infrastructure/helm/fastapi
-
-      - name: Login to Azure
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Set up kubelogin
-        uses: azure/use-kubelogin@v1
-        with:
-          kubelogin-version: "v0.2.12"
-
-      - name: Login to Azure Container Registry (ACR)
+      - name: Install matching kubectl
         run: |
-          az acr login --name "$ACR_NAME"
-
-      - name: Build Docker Image
+          version="$(aws eks describe-cluster --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME" --query cluster.version --output text)"
+          curl -fsSLo kubectl "https://dl.k8s.io/release/v${version}.0/bin/linux/amd64/kubectl"
+          curl -fsSLo kubectl.sha256 "https://dl.k8s.io/release/v${version}.0/bin/linux/amd64/kubectl.sha256"
+          echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check
+          sudo install -m 0755 kubectl /usr/local/bin/kubectl
+      - name: Build, push to ECR, deploy and check health
+        run: ./scripts/deploy.sh
+      - name: Deployment diagnostics
+        if: failure()
         run: |
-          docker build -t "$ACR_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG" .
-
-      - name: Push Docker Image to ACR
-        run: |
-          docker push "$ACR_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG"
-
-      - name: Set AKS Context
-        uses: azure/aks-set-context@v5
-        with:
-          resource-group: ${{ env.AZURE_RESOURCE_GROUP }}
-          cluster-name: ${{ env.AZURE_AKS_CLUSTER }}
-          admin: "false"
-          use-kubelogin: "true"
-
-      - name: Deploy FastAPI with Helm
-        run: |
-          helm upgrade --install "$HELM_RELEASE" ./infrastructure/helm/fastapi \
-            --namespace "$KUBE_NAMESPACE" \
-            --create-namespace \
-            --set-string image.repository="$ACR_NAME.azurecr.io/$IMAGE_NAME" \
-            --set-string image.tag="$IMAGE_TAG" \
-            --wait --timeout 10m
-
-      - name: Show deployment
-        run: |
-          helm status "$HELM_RELEASE" --namespace "$KUBE_NAMESPACE"
+          export KUBECONFIG="$RUNNER_TEMP/eks-diagnostics"
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
           kubectl get pods,services --namespace "$KUBE_NAMESPACE"
+          kubectl get events --namespace "$KUBE_NAMESPACE" --sort-by=.lastTimestamp
+          helm status "$HELM_RELEASE" --namespace "$KUBE_NAMESPACE"

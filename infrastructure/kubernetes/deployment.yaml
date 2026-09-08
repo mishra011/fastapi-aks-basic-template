@@ -12,9 +12,28 @@ spec:
       labels:
         app: fastapi
     spec:
+      nodeSelector:
+        kubernetes.io/arch: amd64
       containers:
-      - name: fastapi
-        image: fastapiacrdm.azurecr.io/dmfastapi-app:latest
-        ports:
-        - containerPort: 8000
-        imagePullPolicy: Always
+        - name: fastapi
+          # Render with kubectl set image --local as documented before applying.
+          image: fastapi:replace-before-deploy
+          ports:
+            - containerPort: 8000
+          imagePullPolicy: IfNotPresent
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
